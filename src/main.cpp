@@ -6,6 +6,7 @@
 #include <mutex>
 #include <atomic>
 #include <csignal>
+#include <cmath>
 
 // Global audio buffer and thread synchronization primitives
 std::vector<float> audio_buffer;
@@ -78,60 +79,99 @@ int main() {
     wparams.language = "en";
     wparams.n_threads = 4;
 
-    std::cout << "\n[Tarvis] Entering Passive Listening Mode. (Press Ctrl+C to quit)" << std::endl;
+    std::cout << "\n[Tarvis] Entering Active VAD Listening Mode. (Speak your paragraph, pause to convert)" << std::endl;
 
     // Start continuous audio recording
     SDL_PauseAudioDevice(device_id, 0);
 
-    // Main continuous listening loop controlled by 'running' flag
+    // VAD Configuration Parameters
+    const float VOICE_THRESHOLD = 0.015f;    // Adjust if your environment is louder/quieter
+    const int SILENCE_DURATION_MS = 800;     // Pause duration (ms) required to finalize and process text
+    const int CHECK_INTERVAL_MS = 100;       // Buffer check interval
+
+    std::vector<float> speech_buffer;
+    bool is_speaking = false;
+    int silence_counter = 0;
+
+    // Main continuous listening loop with VAD control
     while (running) {
-        // Sleep in 50ms chunks for 2 seconds total, allowing instant exit on Ctrl+C
-        int elapsed = 0;
-        while (running && elapsed < 2000) {
-            SDL_Delay(50);
-            elapsed += 50;
-        }
+        SDL_Delay(CHECK_INTERVAL_MS);
 
         if (!running) {
             break;
         }
 
-        // Safely extract and clear the current audio buffer
-        std::vector<float> local_buffer;
+        // Safely extract the current audio chunk from the global buffer
+        std::vector<float> chunk;
         {
             std::lock_guard<std::mutex> lock(audio_mutex);
-            if (audio_buffer.size() < 4000) {
-                audio_buffer.clear();
+            if (audio_buffer.empty()) {
+                if (is_speaking) {
+                    silence_counter += CHECK_INTERVAL_MS;
+                }
                 continue;
             }
-            local_buffer = audio_buffer;
+            chunk = audio_buffer;
             audio_buffer.clear();
         }
 
-        // Run Whisper Inference on the captured chunk
-        if (whisper_full(ctx, wparams, local_buffer.data(), local_buffer.size()) != 0) {
-            std::cerr << "[Tarvis Error] Failed to process audio buffer." << std::endl;
-            continue;
+        // Calculate Root Mean Square (RMS) energy to check for voice activity
+        float sum_squares = 0.0f;
+        for (float sample : chunk) {
+            sum_squares += sample * sample;
         }
+        float rms = std::sqrt(sum_squares / chunk.size());
 
-        // Extract transcribed text from segments
-        std::string transcript = "";
-        const int n_segments = whisper_full_n_segments(ctx);
-        for (int i = 0; i < n_segments; ++i) {
-            transcript += whisper_full_get_segment_text(ctx, i);
+        // Append chunk to ongoing speech accumulation buffer
+        speech_buffer.insert(speech_buffer.end(), chunk.begin(), chunk.end());
+
+        if (rms > VOICE_THRESHOLD) {
+            if (!is_speaking) {
+                std::cout << "[Tarvis] Speech detected... listening..." << std::endl;
+                is_speaking = true;
+            }
+            silence_counter = 0; // Reset silence counter while user is talking
+        } else if (is_speaking) {
+            silence_counter += CHECK_INTERVAL_MS;
+
+            // If silence threshold is reached, process the whole spoken phrase/paragraph
+            if (silence_counter >= SILENCE_DURATION_MS) {
+                std::cout << "[Tarvis] Pause detected. Processing full paragraph..." << std::endl;
+
+                // Ensure there's enough content to warrant inference (at least ~0.5 seconds of data)
+                if (speech_buffer.size() > 8000) {
+                    if (whisper_full(ctx, wparams, speech_buffer.data(), speech_buffer.size()) == 0) {
+                        std::string transcript = "";
+                        const int n_segments = whisper_full_n_segments(ctx);
+                        for (int i = 0; i < n_segments; ++i) {
+                            transcript += whisper_full_get_segment_text(ctx, i);
+                        }
+
+                        // Trim leading spaces
+                        while (!transcript.empty() && (transcript.front() == ' ' || transcript.front() == '\t')) {
+                            transcript.erase(transcript.begin());
+                        }
+
+                        if (!transcript.empty() && transcript.find("[BLANK_AUDIO]") == std::string::npos) {
+                            std::cout << "\n[Full Transcript]: " << transcript << "\n\n";
+                        }
+                    } else {
+                        std::cerr << "[Tarvis Error] Failed to process audio buffer." << std::endl;
+                    }
+                }
+
+                // Reset state for the next paragraph
+                speech_buffer.clear();
+                is_speaking = false;
+                silence_counter = 0;
+                std::cout << "[Tarvis] Resuming listening..." << std::endl;
+            }
+        } else {
+            // Drop trailing background cache so it doesn't grow infinitely when idle
+            if (speech_buffer.size() > 16000 * 2) {
+                speech_buffer.erase(speech_buffer.begin(), speech_buffer.end() - 8000);
+            }
         }
-
-        // Trim leading spaces
-        while (!transcript.empty() && (transcript.front() == ' ' || transcript.front() == '\t')) {
-            transcript.erase(transcript.begin());
-        }
-
-        if (transcript.empty() || transcript.find("[BLANK_AUDIO]") != std::string::npos) {
-            continue;
-        }
-
-        // Output passive text
-        std::cout << "[Passive Output]: " << transcript << std::endl;
     }
 
     // Graceful Cleanup
