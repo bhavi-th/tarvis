@@ -3,8 +3,6 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <algorithm>
-#include <cctype>
 #include <mutex>
 #include <atomic>
 #include <csignal>
@@ -13,6 +11,7 @@
 std::vector<float> audio_buffer;
 std::mutex audio_mutex;
 std::atomic<bool> running(true);
+std::atomic<long long> total_samples_captured(0);
 
 // Signal handler for Ctrl + C (SIGINT)
 void signal_handler(int signal) {
@@ -28,17 +27,10 @@ void audio_callback(void *userdata, Uint8 *stream, int len) {
 
     std::lock_guard<std::mutex> lock(audio_mutex);
     for (int i = 0; i < n_samples; ++i) {
-        // Convert 16-bit signed integer PCM to normalized float [-1.0, 1.0]
         float sample = (float)samples[i] / 32768.0f;
         audio_buffer.push_back(sample);
+        total_samples_captured++;
     }
-}
-
-// Helper function to convert a string to lowercase for case-insensitive wake word matching
-std::string to_lower(const std::string& str) {
-    std::string lower_str = str;
-    std::transform(lower_str.begin(), lower_str.end(), lower_str.begin(), [](unsigned char c){ return std::tolower(c); });
-    return lower_str;
 }
 
 int main() {
@@ -84,32 +76,39 @@ int main() {
     struct whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wparams.print_progress = false;
     wparams.language = "en";
-    wparams.n_threads = 4; // Adjust based on your CPU cores
-    wparams.no_context = true; // Disable context for continuous streaming
+    wparams.n_threads = 4;
 
-    bool active_mode = false;
-    std::cout << "\n[Tarvis] Entering Passive Listening Mode. Say 'Tarvis' to activate. (Press Ctrl+C to quit)" << std::endl;
+    std::cout << "\n[Tarvis] Entering Passive Listening Mode. (Press Ctrl+C to quit)" << std::endl;
 
     // Start continuous audio recording
     SDL_PauseAudioDevice(device_id, 0);
 
-    // Continuous listening loop controlled by 'running' flag
+    // Main continuous listening loop controlled by 'running' flag
     while (running) {
-        // Small delay to prevent CPU hogging
-        SDL_Delay(10);
+        // Sleep in 50ms chunks for 2 seconds total, allowing instant exit on Ctrl+C
+        int elapsed = 0;
+        while (running && elapsed < 2000) {
+            SDL_Delay(50);
+            elapsed += 50;
+        }
+
+        if (!running) {
+            break;
+        }
 
         // Safely extract and clear the current audio buffer
         std::vector<float> local_buffer;
         {
             std::lock_guard<std::mutex> lock(audio_mutex);
-            if (audio_buffer.empty()) {
+            if (audio_buffer.size() < 4000) {
+                audio_buffer.clear();
                 continue;
             }
             local_buffer = audio_buffer;
             audio_buffer.clear();
         }
 
-        // Run Whisper Inference on the captured audio
+        // Run Whisper Inference on the captured chunk
         if (whisper_full(ctx, wparams, local_buffer.data(), local_buffer.size()) != 0) {
             std::cerr << "[Tarvis Error] Failed to process audio buffer." << std::endl;
             continue;
@@ -131,25 +130,8 @@ int main() {
             continue;
         }
 
-        if (!active_mode) {
-            // PASSIVE MODE
-            std::cout << "[Passive Output]: " << transcript << std::endl;
-
-            // Check for wake word 'Tarvis' case-insensitively
-            std::string lower_transcript = to_lower(transcript);
-            if (lower_transcript.find("tarvis") != std::string::npos) {
-                std::cout << "\n[Tarvis] Wake word detected! Switching to Active Mode..." << std::endl;
-                active_mode = true;
-            }
-        } else {
-            // ACTIVE MODE
-            std::cout << "[Active Output]: " << transcript << std::endl;
-            
-            // TODO: Next step will hook this output into your local LLM client!
-
-            std::cout << "\n[Tarvis] Returning to Passive Listening Mode..." << std::endl;
-            active_mode = false;
-        }
+        // Output passive text
+        std::cout << "[Passive Output]: " << transcript << std::endl;
     }
 
     // Graceful Cleanup
