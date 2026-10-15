@@ -1,4 +1,6 @@
 #include "whisper.h"
+#include "llm_client.h"
+#include "tts_client.h"
 #include <SDL2/SDL.h>
 #include <iostream>
 #include <vector>
@@ -78,6 +80,7 @@ int main() {
     wparams.print_progress = false;
     wparams.language = "en";
     wparams.n_threads = 4;
+    wparams.initial_prompt = "Tarvis"; // Help the model recognize the name "Tarvis"
 
     std::cout << "\n[Tarvis] Entering Active VAD Listening Mode. (Speak your paragraph, pause to convert)" << std::endl;
 
@@ -129,6 +132,7 @@ int main() {
             if (!is_speaking) {
                 std::cout << "[Tarvis] Speech detected... listening..." << std::endl;
                 is_speaking = true;
+                speech_buffer.clear(); // Clear any residual audio from idle period
             }
             silence_counter = 0; // Reset silence counter while user is talking
         } else if (is_speaking) {
@@ -154,10 +158,20 @@ int main() {
 
                         if (!transcript.empty() && transcript.find("[BLANK_AUDIO]") == std::string::npos) {
                             std::cout << "\n[Full Transcript]: " << transcript << "\n\n";
+
+                            // 1. Send transcript to LM Studio
+                            std::string llm_response = query_lm_studio(transcript);
+                            std::cout << llm_response << "\n" << std::endl;
+
+                            // 2. Synthesize and speak response using Piper TTS
+                            speak_text(llm_response);
                         }
                     } else {
                         std::cerr << "[Tarvis Error] Failed to process audio buffer." << std::endl;
                     }
+
+                    // Reset whisper context state for next transcription
+                    whisper_reset_timings(ctx);
                 }
 
                 // Reset state for the next paragraph
