@@ -12,6 +12,7 @@ add_executable(tarvis
   src/main.cpp
   src/llm_client.cpp
   src/tts_client.cpp
+  src/text_formatter.cpp
 )
 
 target_link_libraries(tarvis PRIVATE whisper SDL2::SDL2 CURL::libcurl)

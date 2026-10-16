@@ -88,25 +88,16 @@ std::string query_lm_studio(const std::string& prompt) {
             std::cerr << "[Tarvis Error] curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
             curl_easy_cleanup(curl);
             curl_slist_free_all(headers);
-            return "[TARVIS AI]: (error) Connection failed (0 tokens)";
+            return "(error) Connection failed";
         }
 
         curl_easy_cleanup(curl);
         curl_slist_free_all(headers);
     }
 
-    // Parse the fields from the JSON response
-    std::string model = extract_json_string(response_string, "model");
+    // Extract the message content from the JSON response
     std::string content = extract_json_string(response_string, "content");
-    int total_tokens = extract_json_int(response_string, "total_tokens");
+    if (content.empty()) content = response_string;
 
-    if (model.empty()) model = "unknown-model";
-    if (content.empty()) content = response_string; // Fallback if parsing fails
-
-    // Format output as requested: [TARVIS AI]: (model) content (total_tokens)
-    char formatted_output[2048];
-    std::snprintf(formatted_output, sizeof(formatted_output), "[TARVIS AI]: (%s) %s (%d tokens)", 
-                  model.c_str(), content.c_str(), total_tokens);
-
-    return std::string(formatted_output);
+    return content;
 }
