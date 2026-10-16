@@ -109,6 +109,8 @@ int main() {
   bool is_speaking = false;
   int silence_counter = 0;
 
+  bool is_awake = false;
+
   while (running) {
     SDL_Delay(CHECK_INTERVAL_MS);
 
@@ -167,23 +169,42 @@ int main() {
 
             if (!transcript.empty() &&
                 transcript.find("[BLANK_AUDIO]") == std::string::npos) {
-              std::cout << "\n[Full Transcript]: " << transcript << "\n\n";
+              std::cout << "\n[Transcript]: " << transcript << "\n\n";
 
-              std::string llm_response = query_lm_studio(transcript);
+              if (!is_awake) {
+                if (contains_keyword(transcript, "tarvis")) {
+                  is_awake = true;
+                  std::cout << "[Tarvis] Wake word recognized! Starting up...."
+                            << std::endl;
+                  speak_text("I'm awake.");
+                } else {
+                  std::cout << "[Tarvis] Sleeping. Ignoring input."
+                            << std::endl;
+                }
+              } else {
 
-              std::string terminal_output =
-                  format_text_for_terminal(llm_response);
-              std::cout << "[TARVIS AI]: " << terminal_output << "\n"
-                        << std::endl;
+                std::string llm_response = query_lm_studio(transcript);
 
-              std::string tts_ready_text = clean_text_for_tts(llm_response);
-              speak_text(tts_ready_text);
-
-              if (contains_keyword(transcript, "bye") ||
-                  contains_keyword(transcript, "goodbye")) {
-                std::cout << "[Tarvis] Farewell detected. Shutting down..."
+                std::string terminal_output =
+                    format_text_for_terminal(llm_response);
+                std::cout << "[TARVIS AI]: " << terminal_output << "\n"
                           << std::endl;
-                running = false;
+
+                std::string tts_ready_text = clean_text_for_tts(llm_response);
+                speak_text(tts_ready_text);
+
+                if (contains_keyword(transcript, "sleep")) {
+                  is_awake = false;
+                  std::cout << "[Tavis] Sleep command detected. Entering sleep mode..."
+                            << std::endl;
+                }
+
+                if (contains_keyword(transcript, "bye") ||
+                    contains_keyword(transcript, "goodbye")) {
+                  std::cout << "[Tarvis] Farewell detected. Shutting down..."
+                            << std::endl;
+                  running = false;
+                }
               }
             }
           } else {
