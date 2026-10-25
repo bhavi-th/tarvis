@@ -2,65 +2,61 @@
 #include <curl/curl.h>
 #include <iostream>
 #include <string>
+#include <functional>
 
-// Callback for libcurl to capture the HTTP response chunks
-static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
-    userp->append((char*)contents, size * nmemb);
-    return size * nmemb;
-}
+struct StreamContext {
+    std::string* full_response;
+    std::function<void(const std::string&)>* chunk_callback;
+};
 
-// Simple helper to extract a JSON string value by key
-std::string extract_json_string(const std::string& json, const std::string& key) {
-    std::string search_key = "\"" + key + "\":";
-    size_t pos = json.find(search_key);
-    if (pos == std::string::npos) return "";
-    pos += search_key.length();
+static size_t StreamWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    size_t total_size = size * nmemb;
+    std::string chunk((char*)contents, total_size);
+    StreamContext* context = static_cast<StreamContext*>(userp);
     
-    // Skip whitespace
-    while (pos < json.length() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) {
-        pos++;
-    }
-    
-    if (pos < json.length() && json[pos] == '"') {
-        pos++; // skip opening quote
-        size_t end_pos = json.find('"', pos);
-        if (end_pos != std::string::npos) {
-            return json.substr(pos, end_pos - pos);
+    size_t pos = 0;
+    while ((pos = chunk.find("data: ", pos)) != std::string::npos) {
+        pos += 6;
+        size_t end_line = chunk.find('\n', pos);
+        if (end_line == std::string::npos) end_line = chunk.length();
+        
+        std::string json_line = chunk.substr(pos, end_line - pos);
+        if (json_line == "[DONE]") break;
+        
+        size_t content_pos = json_line.find("\"content\":");
+        if (content_pos != std::string::npos) {
+            // Move pointer to the start of the value after "content":
+            content_pos += 10; 
+            
+            // Find the first quote that starts the actual string value
+            size_t start_quote = json_line.find('"', content_pos);
+            if (start_quote != std::string::npos) {
+                size_t end_quote = json_line.find('"', start_quote + 1);
+                if (end_quote != std::string::npos) {
+                    std::string token = json_line.substr(start_quote + 1, end_quote - (start_quote + 1));
+                    
+                    // Accumulate full response
+                    if (context && context->full_response) {
+                        *(context->full_response) += token;
+                    }
+                    
+                    // Fire callback chunk to main.cpp
+                    if (context && context->chunk_callback && *(context->chunk_callback)) {
+                        (*(context->chunk_callback))(token);
+                    }
+                }
+            }
         }
+        pos = end_line;
     }
-    return "";
+
+    return total_size;
 }
 
-// Simple helper to extract a JSON numeric value by key
-int extract_json_int(const std::string& json, const std::string& key) {
-    std::string search_key = "\"" + key + "\":";
-    size_t pos = json.find(search_key);
-    if (pos == std::string::npos) return 0;
-    pos += search_key.length();
-    
-    while (pos < json.length() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) {
-        pos++;
-    }
-    
-    size_t end_pos = pos;
-    while (end_pos < json.length() && (isdigit(json[end_pos]) || json[end_pos] == '.')) {
-        end_pos++;
-    }
-    
-    if (end_pos > pos) {
-        try {
-            return std::stoi(json.substr(pos, end_pos - pos));
-        } catch (...) {
-            return 0;
-        }
-    }
-    return 0;
-}
-
-std::string query_lm_studio(const std::string& prompt) {
+std::string query_lm_studio(const std::string& prompt, std::function<void(const std::string&)> on_chunk) {
     CURL* curl;
     CURLcode res;
-    std::string response_string;
+    std::string full_response = "";
     
     curl = curl_easy_init();
     if (curl) {
@@ -69,23 +65,26 @@ std::string query_lm_studio(const std::string& prompt) {
         std::string json_payload = "{\n"
             "  \"model\": \"local-model\",\n"
             "  \"messages\": [\n"
-            "    {\"role\": \"system\", \"content\": \"You are TARVIS, a concise and sharp local AI assistant.\"},\n"
+            "    {\"role\": \"system\", \"content\": \"You are TARVIS, a concise and sharp local AI assistant. TARVIS stands for Terminal Autonomous Reliable Voice Integrated System.Always ensure proper spacing between words and sentences.\"},\n"
             "    {\"role\": \"user\", \"content\": \"" + prompt + "\"}\n"
             "  ],\n"
-            "  \"temperature\": 0.7\n"
+            "  \"temperature\": 0.7,\n"
+            "  \"stream\": true\n"
             "}";
 
         struct curl_slist *headers = NULL;
         headers = curl_slist_append(headers, "Content-Type: application/json");
         
+        StreamContext context{&full_response, &on_chunk};
+
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_payload.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamWriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &context);
 
         res = curl_easy_perform(curl);
         if (res != CURLE_OK) {
-            std::cerr << "[Tarvis Error] curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
+            std::cerr << "\n[Tarvis Error] curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
             curl_easy_cleanup(curl);
             curl_slist_free_all(headers);
             return "(error) Connection failed";
@@ -95,9 +94,5 @@ std::string query_lm_studio(const std::string& prompt) {
         curl_slist_free_all(headers);
     }
 
-    // Extract the message content from the JSON response
-    std::string content = extract_json_string(response_string, "content");
-    if (content.empty()) content = response_string;
-
-    return content;
+    return full_response;
 }

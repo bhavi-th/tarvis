@@ -183,19 +183,22 @@ int main() {
                 }
               } else {
 
-                std::string llm_response = query_lm_studio(transcript);
+                std::cout << "[TARVIS AI]: " << std::flush;
 
-                std::string terminal_output =
-                    format_text_for_terminal(llm_response);
-                std::cout << "[TARVIS AI]: " << terminal_output << "\n"
-                          << std::endl;
+                std::string llm_response =
+                    query_lm_studio(transcript, [](const std::string &chunk) {
+                      std::cout << chunk << std::flush;
+                    });
+
+                std::cout << std::endl;
 
                 std::string tts_ready_text = clean_text_for_tts(llm_response);
                 speak_text(tts_ready_text);
 
                 if (contains_keyword(transcript, "sleep")) {
                   is_awake = false;
-                  std::cout << "[Tavis] Sleep command detected. Entering sleep mode..."
+                  std::cout << "[Tavis] Sleep command detected. Entering sleep "
+                               "mode..."
                             << std::endl;
                 }
 
