@@ -69,6 +69,9 @@ int main() {
     return 1;
   }
 
+  // Allow PipeWire time to fully initialize and stabilize
+  SDL_Delay(500);
+
   SDL_AudioSpec desired_spec;
   SDL_zero(desired_spec);
   desired_spec.freq = 16000;
@@ -78,11 +81,27 @@ int main() {
   desired_spec.callback = audio_callback;
 
   SDL_AudioSpec obtained_spec;
-  SDL_AudioDeviceID device_id =
-      SDL_OpenAudioDevice(nullptr, 1, &desired_spec, &obtained_spec, 0);
+  SDL_AudioDeviceID device_id = 0;
+  int retry_count = 0;
+  const int max_retries = 3;
+
+  // Retry opening audio device with backoff
+  while (device_id == 0 && retry_count < max_retries) {
+    device_id = SDL_OpenAudioDevice(nullptr, 1, &desired_spec, &obtained_spec, 0);
+    if (device_id == 0) {
+      retry_count++;
+      if (retry_count < max_retries) {
+        std::cerr << "[Tarvis Warning] Failed to open audio device (attempt "
+                  << retry_count << "/" << max_retries << "): "
+                  << SDL_GetError() << ". Retrying in 1 second..." << std::endl;
+        SDL_Delay(1000);
+      }
+    }
+  }
+
   if (device_id == 0) {
-    std::cerr << "[Tarvis Error] Failed to open audio device: "
-              << SDL_GetError() << std::endl;
+    std::cerr << "[Tarvis Error] Failed to open audio device after "
+              << max_retries << " attempts: " << SDL_GetError() << std::endl;
     SDL_Quit();
     whisper_free(ctx);
     return 1;
@@ -187,7 +206,7 @@ int main() {
 
                 std::string llm_response =
                     query_lm_studio(transcript, [](const std::string &chunk) {
-                      std::cout << chunk << std::flush;
+                      std::cout << format_text_for_terminal(chunk) << std::flush;
                     });
 
                 std::cout << std::endl;
@@ -233,7 +252,9 @@ int main() {
   std::cout << "[Tarvis] Releasing hardware and memory resources..."
             << std::endl;
   SDL_PauseAudioDevice(device_id, 1);
+  SDL_Delay(100);
   SDL_CloseAudioDevice(device_id);
+  SDL_Delay(200);
   SDL_Quit();
   whisper_free(ctx);
   std::cout << "[Tarvis] Exited successfully." << std::endl;
